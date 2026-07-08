@@ -53,6 +53,7 @@ use crate::zero_state::render_zero_state;
 /// Width used before the first layout pass pushes the real terminal width into the editor.
 const INITIAL_INPUT_WIDTH: u16 = 80;
 const MAX_INPUT_TEXT_ROWS: u16 = 6;
+const MAX_SLASH_MENU_ROWS: u16 = 10;
 
 /// The footer hint shown while the ctrl-c exit confirmation is armed.
 const CTRL_C_EXIT_HINT: &str = "ctrl-c again to exit";
@@ -257,11 +258,20 @@ impl TuiTerminalSessionView {
             }
         });
         let input_mode_for_input_view = ai_input_model.clone();
+        let slash_commands_for_input = slash_commands.clone();
         let input_view = ctx.add_typed_action_tui_view(move |ctx| {
-            TuiInputView::new(input_editor_model, input_mode_for_input_view, ctx)
+            TuiInputView::new_with_slash_commands(
+                input_editor_model,
+                input_mode_for_input_view,
+                Some(slash_commands_for_input),
+                ctx,
+            )
         });
         ctx.subscribe_to_view(&input_view, |view, _, event, ctx| match event {
             TuiInputViewEvent::Submitted(text) => view.handle_submitted(text.clone(), ctx),
+            TuiInputViewEvent::AcceptedSlashCommand(action) => {
+                log::debug!("Accepted TUI slash command menu item: {action:?}");
+            }
         });
         // The input box border color and the footer's shell-mode hint depend
         // on the input mode.
@@ -804,7 +814,7 @@ impl TuiView for TuiTerminalSessionView {
     }
 
     fn render(&self, ctx: &AppContext) -> Box<dyn TuiElement> {
-        let _slash_commands_open = self.slash_commands.as_ref(ctx).is_open();
+        let slash_command_menu = self.slash_commands.as_ref(ctx).render_menu(ctx);
         // The border takes the shell-mode accent while in shell mode.
         let builder = TuiUiBuilder::from_app(ctx);
         let border_style = if self.is_shell_mode(ctx) {
@@ -826,14 +836,14 @@ impl TuiView for TuiTerminalSessionView {
         // While the transcript has nothing to show, the zero state fills its
         // slot; the first accepted submission produces a visible block, which
         // swaps the transcript back in.
-        let mut column = TuiFlex::column();
+        let mut content = TuiFlex::column();
         if self.transcript.as_ref(ctx).is_empty() {
-            column = column.flex_child(render_zero_state(
+            content = content.flex_child(render_zero_state(
                 self.current_working_directory(ctx).as_deref(),
                 ctx,
             ));
         } else {
-            column = column.flex_child(TuiChildView::new(&self.transcript).finish());
+            content = content.flex_child(TuiChildView::new(&self.transcript).finish());
         }
 
         // While the selected conversation is in progress (the GUI warping
@@ -856,22 +866,26 @@ impl TuiView for TuiTerminalSessionView {
                 .latest_exchange()
                 .and_then(|exchange| exchange.time_since_start());
             if let Some(elapsed) = warping_elapsed {
-                column = column.child(
+                content = content.child(
                     TuiContainer::new(render_warping_indicator(elapsed, ctx))
                         .with_padding_top(1)
                         .finish(),
                 );
             }
         }
-
-        TuiContainer::new(
-            column
-                .child(input_box.finish())
-                .child(self.render_footer(ctx).finish())
+        if let Some(menu) = slash_command_menu {
+            content = content.child(
+                TuiConstrainedBox::new(menu)
+                    .with_max_rows(MAX_SLASH_MENU_ROWS)
+                    .finish(),
+            );
+        }
+        content = content.child(input_box.finish()).child(
+            TuiConstrainedBox::new(self.render_footer(ctx).finish())
+                .with_max_rows(1)
                 .finish(),
-        )
-        .with_padding(2)
-        .finish()
+        );
+        TuiContainer::new(content.finish()).with_padding(2).finish()
     }
 }
 
