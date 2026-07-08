@@ -2,8 +2,8 @@
 
 use warp::tui_export::AcceptSlashCommandOrSavedPrompt;
 use warpui_core::elements::tui::{
-    TuiBuffer, TuiConstraint, TuiContainer, TuiElement, TuiFlex, TuiLayoutContext, TuiRect,
-    TuiPaintContext, TuiSize, TuiText,
+    TuiBuffer, TuiConstraint, TuiContainer, TuiElement, TuiFlex, TuiLayoutContext, TuiPaintContext,
+    TuiRect, TuiSize, TuiText,
 };
 use warpui_core::elements::CrossAxisAlignment;
 use warpui_core::{AppContext, ModelAsRef, ModelHandle, UpdateModel};
