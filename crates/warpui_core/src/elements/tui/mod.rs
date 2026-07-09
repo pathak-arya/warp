@@ -50,7 +50,9 @@ pub use animated::TuiAnimated;
 pub use buffer::{Cell, Color, Modifier, TuiBuffer, TuiBufferExt, TuiStyle};
 pub use child_view::TuiChildView;
 pub use clipped::TuiClipped;
-pub use collapsible::tui_collapsible;
+pub use collapsible::{
+    tui_collapsible, tui_collapsible_with_header_spans, TuiCollapsibleHeaderSpan,
+};
 pub use constrained_box::TuiConstrainedBox;
 pub use container::TuiContainer;
 pub use event::{
