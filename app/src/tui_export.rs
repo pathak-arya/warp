@@ -4,17 +4,18 @@ pub use repo_metadata::repositories::RepoDetectionSource;
 
 pub use crate::ai::agent::api::ServerConversationToken;
 pub use crate::ai::agent::conversation::{
-    AIConversationAutoexecuteMode, AIConversationId, ConversationStatus,
+    AIConversationAutoexecuteMode, AIConversationId, ConversationStatus, TodoStatus,
 };
 pub use crate::ai::agent::task::TaskId;
+pub use crate::ai::agent::todos::AIAgentTodoList;
 pub use crate::ai::agent::{
     AIAgentAction, AIAgentActionId, AIAgentActionResult, AIAgentActionResultType,
     AIAgentActionType, AIAgentExchangeId, AIAgentInput, AIAgentOutput, AIAgentOutputMessage,
-    AIAgentOutputMessageType, AIAgentPtyWriteMode, AIAgentText, AIAgentTextSection,
-    AskUserQuestionResult, CancellationReason, FileGlobV2Result, GrepResult, MessageId,
-    RequestCommandOutputResult, RunAgentsAgentOutcomeKind, RunAgentsResult,
+    AIAgentOutputMessageType, AIAgentPtyWriteMode, AIAgentText, AIAgentTextSection, AIAgentTodo,
+    AIAgentTodoId, AskUserQuestionResult, CancellationReason, FileGlobV2Result, GrepResult,
+    MessageId, RequestCommandOutputResult, RunAgentsAgentOutcomeKind, RunAgentsResult,
     SearchCodebaseFailureReason, SearchCodebaseResult, ServerOutputId, Shared,
-    StartAgentExecutionMode, SuggestNewConversationResult, UserQueryMode,
+    StartAgentExecutionMode, SuggestNewConversationResult, TodoOperation, UserQueryMode,
 };
 pub use crate::ai::blocklist::agent_view::{
     AgentViewDisplayMode, AgentViewEntryOrigin, EnterAgentViewError,
