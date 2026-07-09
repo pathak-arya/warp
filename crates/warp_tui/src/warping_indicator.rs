@@ -1,4 +1,4 @@
-//! The in-progress `⋮ Warping (Ns)` indicator row rendered between the
+//! The in-progress `⋮ Warping... (Ns)` indicator row rendered between the
 //! transcript and the input box while the selected conversation is in
 //! progress — the TUI counterpart of the GUI's warping indicator.
 //!
@@ -22,6 +22,8 @@ use warpui_core::elements::tui::{
 use warpui_core::AppContext;
 
 use crate::tui_builder::TuiUiBuilder;
+
+const FAST_SPIN_FRAME_MILLIS: u64 = 80;
 
 /// The spinner choreography from the Figma prototype: a 180° rotation right,
 /// a 180° rotation back left, then a few fast full spins right, restarting.
@@ -47,21 +49,21 @@ static SPINNER_TIMELINE: LazyLock<KeyframeTimeline<&'static str>> = LazyLock::ne
         // Fast spins right: one and a half turns (12 × 45° steps = 540°, three
         // glyph cycles), ending back at vertical — the loop's restarting `⋮`
         // doubles as the final step.
-        Keyframe::from_millis("⋰", 50),
-        Keyframe::from_millis("⋯", 50),
-        Keyframe::from_millis("⋱", 50),
-        Keyframe::from_millis("⋮", 50),
-        Keyframe::from_millis("⋰", 50),
-        Keyframe::from_millis("⋯", 50),
-        Keyframe::from_millis("⋱", 50),
-        Keyframe::from_millis("⋮", 50),
-        Keyframe::from_millis("⋰", 50),
-        Keyframe::from_millis("⋯", 50),
-        Keyframe::from_millis("⋱", 50),
+        Keyframe::from_millis("⋰", FAST_SPIN_FRAME_MILLIS),
+        Keyframe::from_millis("⋯", FAST_SPIN_FRAME_MILLIS),
+        Keyframe::from_millis("⋱", FAST_SPIN_FRAME_MILLIS),
+        Keyframe::from_millis("⋮", FAST_SPIN_FRAME_MILLIS),
+        Keyframe::from_millis("⋰", FAST_SPIN_FRAME_MILLIS),
+        Keyframe::from_millis("⋯", FAST_SPIN_FRAME_MILLIS),
+        Keyframe::from_millis("⋱", FAST_SPIN_FRAME_MILLIS),
+        Keyframe::from_millis("⋮", FAST_SPIN_FRAME_MILLIS),
+        Keyframe::from_millis("⋰", FAST_SPIN_FRAME_MILLIS),
+        Keyframe::from_millis("⋯", FAST_SPIN_FRAME_MILLIS),
+        Keyframe::from_millis("⋱", FAST_SPIN_FRAME_MILLIS),
     ])
 });
 
-/// Renders the `⋮ Warping (Ns)` row for an exchange that has been running for
+/// Renders the `⋮ Warping... (Ns)` row for an exchange that has been running for
 /// `elapsed`.
 pub(crate) fn render_warping_indicator(elapsed: Duration, app: &AppContext) -> Box<dyn TuiElement> {
     let builder = TuiUiBuilder::from_app(app);
@@ -72,7 +74,7 @@ pub(crate) fn render_warping_indicator(elapsed: Duration, app: &AppContext) -> B
     // The spinner repaints at its timeline's shortest hold so the fast spins
     // don't skip frames; repaint requests coalesce to the earliest deadline.
     let spinner_style = builder.warping_spinner_style();
-    let spinner = TuiAnimated::new(Duration::from_millis(50), move || {
+    let spinner = TuiAnimated::new(Duration::from_millis(FAST_SPIN_FRAME_MILLIS), move || {
         TuiText::new(*SPINNER_TIMELINE.value_at(clock.elapsed()))
             .with_style(spinner_style)
             .truncate()
@@ -80,7 +82,7 @@ pub(crate) fn render_warping_indicator(elapsed: Duration, app: &AppContext) -> B
     });
 
     let label = TuiShimmeringText::new(
-        "Warping",
+        "Warping...",
         builder.warping_base_color(),
         builder.warping_shimmer_color(),
         ShimmerConfig::default(),
