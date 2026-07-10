@@ -857,11 +857,17 @@ fn build_local_claude_stream(request_id: Uuid, prompt: String) -> api::ResponseS
 /// output) rather than a stream error, so the turn always completes cleanly
 /// without triggering the cloud retry/resume path.
 async fn run_local_claude(prompt: &str) -> String {
-    let Some(claude_path) = crate::util::path::resolve_executable("claude") else {
-        return "⚠️ The local `claude` CLI was not found on your PATH. Install Claude Code to use the local agent.".to_string();
+    // A Finder/Dock-launched .app inherits a minimal PATH that omits the usual
+    // user bin dirs, so `claude` (and the tools it spawns) can be unfindable.
+    // Augment PATH with the common locations before resolving and spawning.
+    let path_env = augmented_path_env();
+    let Some(claude_path) = crate::util::path::resolve_executable_in_path("claude", &path_env)
+    else {
+        return "⚠️ The local `claude` CLI was not found. Install Claude Code (https://claude.com/claude-code) to use the local agent.".to_string();
     };
 
     let output = command::r#async::Command::new(claude_path.as_os_str())
+        .env("PATH", &path_env)
         .args([
             "--print",
             "--output-format",
@@ -890,6 +896,34 @@ async fn run_local_claude(prompt: &str) -> String {
         }
         Err(e) => format!("⚠️ Failed to launch the local `claude` CLI: {e}"),
     }
+}
+
+/// PATH augmented with the usual user bin dirs, so a Finder/Dock-launched app
+/// (which inherits only a minimal PATH) can still find `claude` and the tools
+/// claude itself spawns. Prepends the common locations to the inherited PATH.
+fn augmented_path_env() -> std::ffi::OsString {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+        dirs.push(home.join(".local/bin"));
+        dirs.push(home.join(".claude/local"));
+        dirs.push(home.join("bin"));
+    }
+    for fixed in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+        dirs.push(std::path::PathBuf::from(fixed));
+    }
+
+    let mut path = std::ffi::OsString::new();
+    for dir in dirs {
+        if !path.is_empty() {
+            path.push(":");
+        }
+        path.push(dir);
+    }
+    if let Some(existing) = std::env::var_os("PATH").filter(|p| !p.is_empty()) {
+        path.push(":");
+        path.push(existing);
+    }
+    path
 }
 
 /// Extracts the assistant-visible text from a captured claude stream-json dump,
