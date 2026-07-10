@@ -53,6 +53,7 @@ pub use crate::changelog_model::{
     ChangelogModel, ChangelogRequestType, ChangelogState, Event as ChangelogModelEvent,
 };
 pub use crate::code::DiffResult;
+pub use crate::search::slash_command_menu::SlashCommandId;
 pub use crate::settings::AISettingsChangedEvent;
 pub use crate::terminal::color::{Colors as TerminalColors, List as TerminalColorList};
 pub use crate::terminal::event::AfterBlockCompletedEvent;
