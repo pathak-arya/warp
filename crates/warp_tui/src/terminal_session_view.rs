@@ -106,7 +106,6 @@ pub(crate) struct TuiTerminalSessionView {
     transcript: ViewHandle<TuiTranscriptView>,
     input_view: ViewHandle<TuiInputView>,
     inline_menu: TuiInlineMenu,
-    slash_commands: ModelHandle<TuiSlashCommandModel>,
     slash_commands_source: ModelHandle<TuiSlashCommandDataSource>,
     conversation_selection: ConversationSelectionHandle,
     ai_controller: ModelHandle<BlocklistAIController>,
@@ -434,7 +433,6 @@ impl TuiTerminalSessionView {
             transcript,
             input_view,
             inline_menu,
-            slash_commands,
             slash_commands_source,
             conversation_selection,
             ai_controller,
@@ -794,15 +792,11 @@ impl TuiTerminalSessionView {
                 self.input_view.update(ctx, |input, ctx| {
                     input.set_text(&prompt, ctx);
                 });
-                self.slash_commands
-                    .update(ctx, |slash_commands, ctx| slash_commands.dismiss(ctx));
             }
             AcceptSlashCommandOrSavedPrompt::Skill { name, .. } => {
                 self.input_view.update(ctx, |input, ctx| {
                     input.set_text(&format!("/{name} "), ctx);
                 });
-                self.slash_commands
-                    .update(ctx, |slash_commands, ctx| slash_commands.dismiss(ctx));
             }
         }
         ctx.notify();
@@ -814,8 +808,6 @@ impl TuiTerminalSessionView {
                 self.input_view.update(ctx, |input, ctx| {
                     input.set_text(&text, ctx);
                 });
-                self.slash_commands
-                    .update(ctx, |slash_commands, ctx| slash_commands.dismiss(ctx));
             }
             SlashCommandSelectionBehavior::Execute => {
                 self.execute_tui_slash_command(command, None, ctx);
