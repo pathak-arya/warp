@@ -1382,16 +1382,26 @@ impl FormattedTextElement {
                     .take(pos.row_index)
                     .map(|line| line.height())
                     .sum::<f32>();
+            // Row-top -> baseline offset, computed exactly like the glyph
+            // painter does (a glyph's `position_along_baseline.y()` is
+            // relative to the baseline itself, so it can't be used here).
             let baseline_y = y_offset
-                + line
-                    .baseline_y_for_index(pos.glyph_index)
-                    .unwrap_or(line.ascent);
+                + crate::text_layout::default_compute_baseline_position(
+                    line.font_size,
+                    line.line_height_ratio,
+                    line.ascent,
+                    line.descent,
+                );
 
-            // Draw at the typeset's natural size, shrinking (proportionally)
-            // only if the reserved source span is narrower than the image.
+            // Draw at the typeset's natural size. The image may overflow the
+            // reserved source span by roughly one space width (absorbed by
+            // the whitespace that follows an inline span); shrink
+            // proportionally only beyond that, so short spans like `$x$`
+            // don't get squished.
+            let slack = placement.font_size * 0.33;
             let mut draw_size = placement.natural_size;
-            if span_width > 0. && draw_size.x() > span_width {
-                draw_size = draw_size * (span_width / draw_size.x());
+            if span_width > 0. && draw_size.x() > span_width + slack {
+                draw_size = draw_size * ((span_width + slack) / draw_size.x());
             }
             if draw_size.x() <= 0. || draw_size.y() <= 0. {
                 continue;
