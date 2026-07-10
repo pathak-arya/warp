@@ -71,10 +71,13 @@ pub fn render_math(
     } else {
         MathStyle::Text
     };
+    // Inline math sits within a line of text, so keep the image tight to the
+    // glyphs; display math is a standalone block where breathing room helps.
+    let padding = if display { PADDING } else { 1.0 };
     let layout_options = LayoutOptions::default().with_style(style).with_color(color);
     let svg_options = SvgOptions {
         font_size,
-        padding: PADDING,
+        padding,
         stroke_width: STROKE_WIDTH,
         embed_glyphs: true,
         font_dir: String::new(),
@@ -86,8 +89,8 @@ pub fn render_math(
     // The SVG is `(height + depth)` ems tall plus padding on each side; the
     // baseline sits `height` ems (plus the top padding) below the top edge.
     let total_ems = layout_box.height + layout_box.depth;
-    let image_height = total_ems * font_size + 2.0 * PADDING;
-    let baseline_from_top = layout_box.height * font_size + PADDING;
+    let image_height = total_ems * font_size + 2.0 * padding;
+    let baseline_from_top = layout_box.height * font_size + padding;
     let baseline_fraction = if image_height > 0.0 {
         (baseline_from_top / image_height) as f32
     } else {

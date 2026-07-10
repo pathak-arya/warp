@@ -175,6 +175,9 @@ pub struct FormattedTextElement {
     /// math key. `None` records a failed typeset so the raw LaTeX source stays
     /// visible and we don't retry every relayout.
     math_metrics_cache: HashMap<String, Option<(Vector2F, f32)>>,
+    /// Memoized advance width of a space glyph per font-size bits, used to
+    /// reserve inline-math spans that match the typeset image's width.
+    math_space_width_cache: HashMap<u32, f32>,
     is_selectable: bool,
     is_mouse_interaction_disabled: bool,
     disable_text_wrapping: bool,
@@ -215,6 +218,7 @@ impl FormattedTextElement {
             saved_glyph_positions: vec![],
             inline_math_placements: vec![],
             math_metrics_cache: HashMap::new(),
+            math_space_width_cache: HashMap::new(),
             is_selectable: false,
             is_mouse_interaction_disabled: false,
             disable_text_wrapping: false,
@@ -1363,12 +1367,6 @@ impl FormattedTextElement {
                     0.
                 };
             let x_start = line.x_for_index(pos.glyph_index);
-            // `x_for_index` returns the line width for indices past the row's
-            // last glyph, which clamps spans that wrap onto the next row.
-            let x_end = line
-                .x_for_index(pos.glyph_index + placement.char_len)
-                .max(x_start);
-            let span_width = x_end - x_start;
 
             let y_offset = self
                 .laid_out_text
@@ -1398,10 +1396,14 @@ impl FormattedTextElement {
             // the whitespace that follows an inline span); shrink
             // proportionally only beyond that, so short spans like `$x$`
             // don't get squished.
-            let slack = placement.font_size * 0.33;
+            // The span was reserved at the image's width during layout, so
+            // draw at natural size; clamp only to what remains of the row (a
+            // span that wraps draws clamped on its first row).
+            let row_remaining =
+                (line.width + line.trailing_whitespace_width - x_start).max(0.);
             let mut draw_size = placement.natural_size;
-            if span_width > 0. && draw_size.x() > span_width + slack {
-                draw_size = draw_size * ((span_width + slack) / draw_size.x());
+            if row_remaining > 0. && draw_size.x() > row_remaining {
+                draw_size = draw_size * (row_remaining / draw_size.x());
             }
             if draw_size.x() <= 0. || draw_size.y() <= 0. {
                 continue;
@@ -1447,6 +1449,44 @@ impl FormattedTextElement {
             }
         }
     }
+}
+
+/// Measures the advance width of a single space glyph at `font_size`, used to
+/// size inline-math span reservations. A lone space's advance is reported as
+/// trailing whitespace, so read that (falling back to a third of the font
+/// size, the usual UI-font space width).
+fn measure_space_width(
+    family_id: FamilyId,
+    font_size: f32,
+    line_height_ratio: f32,
+    ctx: &mut LayoutContext,
+    app: &AppContext,
+) -> f32 {
+    let styles = [(
+        0..1,
+        StyleAndFont::new(family_id, Properties::default(), TextStyle::default()),
+    )];
+    let frame = ctx.text_layout_cache.layout_text(
+        " ",
+        LineStyle {
+            font_size,
+            line_height_ratio,
+            baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+            fixed_width_tab_size: None,
+        },
+        &styles,
+        f32::MAX,
+        f32::MAX,
+        TextAlignment::Left,
+        None,
+        &app.font_cache().text_layout_system(),
+    );
+    frame
+        .lines()
+        .first()
+        .map(|line| line.width + line.trailing_whitespace_width)
+        .filter(|width| *width > 0.)
+        .unwrap_or(font_size / 3.)
 }
 
 /// Typesets `latex` once to learn its natural (logical-pixel) size and
@@ -2011,11 +2051,13 @@ impl Element for FormattedTextElement {
                 let mut current_link_style: Option<HighlightedRange> = None;
 
                 for inline in texts {
-                    // Inline math: keep the LaTeX source as transparent glyphs
-                    // so selection/copy/wrapping/find all operate on the source
-                    // text unchanged, and composite the typeset image over the
-                    // span at paint time. On typesetting failure the source
-                    // stays visible as normal text.
+                    // Inline math: reserve a run of space glyphs matching the
+                    // typeset image's width and composite the image over it at
+                    // paint time, baseline-aligned. Char indices stay coherent
+                    // for selection/wrapping (a selection across the span
+                    // copies spaces; the LaTeX source remains available via
+                    // block-level copy). On typesetting failure the raw source
+                    // renders as normal text.
                     if let Some(math_mode) = inline.styles.math {
                         let metrics_key = format!(
                             "{}\u{1}{math_mode:?}\u{1}{}",
@@ -2029,15 +2071,31 @@ impl Element for FormattedTextElement {
                             ),
                         };
                         if let Some((natural_size, baseline_fraction)) = metrics {
-                            let char_count = inline.text.chars().count();
-                            let mut math_text_style = TextStyle::default();
-                            math_text_style.foreground_color = Some(ColorU::new(0, 0, 0, 0));
+                            // Reserve the span with space glyphs sized to the
+                            // typeset image (not the LaTeX source, whose width
+                            // is unrelated) so the image fits without trailing
+                            // gaps or shrinking.
+                            let space_width = match self
+                                .math_space_width_cache
+                                .entry(font_size.to_bits())
+                            {
+                                Entry::Occupied(entry) => *entry.get(),
+                                Entry::Vacant(vacant) => *vacant.insert(measure_space_width(
+                                    self.family_id,
+                                    font_size,
+                                    self.line_height_ratio,
+                                    ctx,
+                                    app,
+                                )),
+                            };
+                            let char_count = ((natural_size.x() / space_width).ceil() as usize)
+                                .max(1);
                             styles.push((
                                 prev_index..prev_index + char_count,
                                 StyleAndFont::new(
                                     self.family_id,
                                     Properties::default(),
-                                    math_text_style,
+                                    TextStyle::default(),
                                 ),
                             ));
                             self.inline_math_placements.push(InlineMathPlacement {
@@ -2056,7 +2114,7 @@ impl Element for FormattedTextElement {
                                 baseline_fraction,
                             });
                             prev_index += char_count;
-                            text.push_str(&inline.text);
+                            text.extend(std::iter::repeat_n(' ', char_count));
                             continue;
                         }
                     }
