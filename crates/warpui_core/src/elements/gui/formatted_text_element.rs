@@ -1367,6 +1367,12 @@ impl FormattedTextElement {
                     0.
                 };
             let x_start = line.x_for_index(pos.glyph_index);
+            // `x_for_index` returns the line width for indices past the row's
+            // last glyph, which also clamps spans wrapping onto the next row.
+            let x_end = line
+                .x_for_index(pos.glyph_index + placement.char_len)
+                .max(x_start);
+            let span_width = x_end - x_start;
 
             let y_offset = self
                 .laid_out_text
@@ -1397,13 +1403,12 @@ impl FormattedTextElement {
             // proportionally only beyond that, so short spans like `$x$`
             // don't get squished.
             // The span was reserved at the image's width during layout, so
-            // draw at natural size; clamp only to what remains of the row (a
-            // span that wraps draws clamped on its first row).
-            let row_remaining =
-                (line.width + line.trailing_whitespace_width - x_start).max(0.);
+            // natural size normally fits exactly; clamping to the span's
+            // laid-out width guarantees the image can never overlap the text
+            // that follows, whatever a font backend reports for space widths.
             let mut draw_size = placement.natural_size;
-            if row_remaining > 0. && draw_size.x() > row_remaining {
-                draw_size = draw_size * (row_remaining / draw_size.x());
+            if span_width > 0. && draw_size.x() > span_width + 1. {
+                draw_size = draw_size * ((span_width + 1.) / draw_size.x());
             }
             if draw_size.x() <= 0. || draw_size.y() <= 0. {
                 continue;
@@ -1452,9 +1457,11 @@ impl FormattedTextElement {
 }
 
 /// Measures the advance width of a single space glyph at `font_size`, used to
-/// size inline-math span reservations. A lone space's advance is reported as
-/// trailing whitespace, so read that (falling back to a third of the font
-/// size, the usual UI-font space width).
+/// size inline-math span reservations. Measured differentially — the width of
+/// `"x x"` minus the width of `"xx"` — which sidesteps backend ambiguity in
+/// how lone/trailing whitespace advances are reported. Falls back to a third
+/// of the font size (the usual UI-font space width) if the measurement
+/// degenerates.
 fn measure_space_width(
     family_id: FamilyId,
     font_size: f32,
@@ -1462,31 +1469,48 @@ fn measure_space_width(
     ctx: &mut LayoutContext,
     app: &AppContext,
 ) -> f32 {
-    let styles = [(
-        0..1,
-        StyleAndFont::new(family_id, Properties::default(), TextStyle::default()),
-    )];
-    let frame = ctx.text_layout_cache.layout_text(
-        " ",
-        LineStyle {
-            font_size,
-            line_height_ratio,
-            baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
-            fixed_width_tab_size: None,
-        },
-        &styles,
-        f32::MAX,
-        f32::MAX,
-        TextAlignment::Left,
-        None,
-        &app.font_cache().text_layout_system(),
-    );
-    frame
-        .lines()
-        .first()
-        .map(|line| line.width + line.trailing_whitespace_width)
-        .filter(|width| *width > 0.)
-        .unwrap_or(font_size / 3.)
+    fn measure(
+        text: &str,
+        family_id: FamilyId,
+        font_size: f32,
+        line_height_ratio: f32,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> f32 {
+        let styles = [(
+            0..text.chars().count(),
+            StyleAndFont::new(family_id, Properties::default(), TextStyle::default()),
+        )];
+        let frame = ctx.text_layout_cache.layout_text(
+            text,
+            LineStyle {
+                font_size,
+                line_height_ratio,
+                baseline_ratio: DEFAULT_TOP_BOTTOM_RATIO,
+                fixed_width_tab_size: None,
+            },
+            &styles,
+            f32::MAX,
+            f32::MAX,
+            TextAlignment::Left,
+            None,
+            &app.font_cache().text_layout_system(),
+        );
+        frame
+            .lines()
+            .first()
+            .map(|line| line.width + line.trailing_whitespace_width)
+            .unwrap_or(0.)
+    }
+
+    let with_space = measure("x x", family_id, font_size, line_height_ratio, ctx, app);
+    let without_space = measure("xx", family_id, font_size, line_height_ratio, ctx, app);
+    let advance = with_space - without_space;
+    if advance > 0.1 {
+        advance
+    } else {
+        font_size / 3.
+    }
 }
 
 /// Typesets `latex` once to learn its natural (logical-pixel) size and
