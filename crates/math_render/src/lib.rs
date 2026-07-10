@@ -40,6 +40,30 @@ pub fn render_math_to_svg(
     color: &str,
     font_size: f64,
 ) -> Result<String, MathRenderError> {
+    render_math(latex, display, color, font_size).map(|rendered| rendered.svg)
+}
+
+/// A typeset equation plus the metrics needed to place it inline in a line of
+/// text.
+pub struct RenderedMath {
+    /// Self-contained SVG document (glyphs embedded as outline paths).
+    pub svg: String,
+    /// Fraction, in `[0, 1]`, from the **top** of the rendered image down to the
+    /// math baseline. Multiply by the image's rendered height to find where the
+    /// equation's baseline sits, then align that to the surrounding text
+    /// baseline for inline math.
+    pub baseline_fraction: f32,
+}
+
+/// Render LaTeX math and also report where its baseline sits within the image,
+/// for inline (baseline-aligned) placement. See [`render_math_to_svg`] for the
+/// parameters.
+pub fn render_math(
+    latex: &str,
+    display: bool,
+    color: &str,
+    font_size: f64,
+) -> Result<RenderedMath, MathRenderError> {
     let color =
         Color::parse(color).ok_or_else(|| MathRenderError::InvalidColor(color.to_string()))?;
     let style = if display {
@@ -58,8 +82,23 @@ pub fn render_math_to_svg(
 
     let ast = parse(latex).map_err(|error| MathRenderError::Parse(error.to_string()))?;
     let layout_box = layout(&ast, &layout_options);
+
+    // The SVG is `(height + depth)` ems tall plus padding on each side; the
+    // baseline sits `height` ems (plus the top padding) below the top edge.
+    let total_ems = layout_box.height + layout_box.depth;
+    let image_height = total_ems * font_size + 2.0 * PADDING;
+    let baseline_from_top = layout_box.height * font_size + PADDING;
+    let baseline_fraction = if image_height > 0.0 {
+        (baseline_from_top / image_height) as f32
+    } else {
+        1.0
+    };
+
     let display_list = to_display_list(&layout_box);
-    Ok(render_to_svg(&display_list, &svg_options))
+    Ok(RenderedMath {
+        svg: render_to_svg(&display_list, &svg_options),
+        baseline_fraction,
+    })
 }
 
 #[cfg(test)]
