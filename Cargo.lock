@@ -15672,6 +15672,7 @@ dependencies = [
  "log",
  "markdown_parser",
  "markup5ever",
+ "math_render",
  "mermaid_to_svg",
  "mime_guess",
  "num-traits",

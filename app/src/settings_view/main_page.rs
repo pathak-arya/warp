@@ -1222,7 +1222,8 @@ impl SettingsPageMeta for MainSettingsPageView {
     }
 
     fn should_render(&self, _ctx: &AppContext) -> bool {
-        true
+        // Local fork: the Account page only advertises login/cloud plans.
+        false
     }
 
     fn on_page_selected(&mut self, _: bool, ctx: &mut ViewContext<Self>) {

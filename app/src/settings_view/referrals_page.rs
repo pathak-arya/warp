@@ -406,7 +406,8 @@ impl SettingsPageMeta for ReferralsPageView {
     }
 
     fn should_render(&self, _ctx: &AppContext) -> bool {
-        true
+        // Local fork: commercial/cloud settings pages are hidden.
+        false
     }
 
     fn on_page_selected(&mut self, _: bool, ctx: &mut ViewContext<Self>) {

@@ -1,5 +1,4 @@
 use pathfinder_color::ColorU;
-use pathfinder_geometry::vector::vec2f;
 use ui_components::{button, Component as _, Options as _};
 use warp_core::send_telemetry_from_ctx;
 use warp_core::ui::appearance::Appearance;
@@ -9,13 +8,11 @@ use warpui_core::elements::shimmering_text::{
     ShimmerConfig, ShimmeringTextElement, ShimmeringTextStateHandle,
 };
 use warpui_core::elements::{
-    Align, ChildAnchor, ConstrainedBox, Container, CrossAxisAlignment, Flex, FormattedTextElement,
-    MainAxisAlignment, MainAxisSize, MouseStateHandle, OffsetPositioning, ParentAnchor,
-    ParentElement, ParentOffsetBounds, Stack,
+    Align, ConstrainedBox, Container, CrossAxisAlignment, Flex, FormattedTextElement,
+    MainAxisAlignment, MainAxisSize, ParentElement, Stack,
 };
 use warpui_core::keymap::Keystroke;
 use warpui_core::text_layout::TextAlignment;
-use warpui_core::ui_components::components::{UiComponent as _, UiComponentStyles};
 use warpui_core::{
     AppContext, Element, Entity, ModelHandle, SingletonEntity as _, TypedActionView, View,
     ViewContext,
@@ -40,7 +37,6 @@ pub struct IntroSlide {
     onboarding_state: ModelHandle<OnboardingStateModel>,
     get_started_button: button::Button,
     shimmering_title_handle: ShimmeringTextStateHandle,
-    login_mouse_state: MouseStateHandle,
 }
 
 impl IntroSlide {
@@ -49,7 +45,6 @@ impl IntroSlide {
             onboarding_state,
             get_started_button: button::Button::default(),
             shimmering_title_handle: ShimmeringTextStateHandle::new(),
-            login_mouse_state: MouseStateHandle::default(),
         }
     }
 }
@@ -65,59 +60,15 @@ impl View for IntroSlide {
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         let appearance = Appearance::as_ref(app);
-        let theme = appearance.theme();
         let content = self.render_centered_content(appearance);
         let constrained = ConstrainedBox::new(content).with_max_width(421.).finish();
         // Background is rendered by the parent onboarding view (including background images).
         let centered = Container::new(Align::new(constrained).finish()).finish();
 
-        let sub_text_color = internal_colors::text_sub(theme, theme.background().into_solid());
-        let ui_builder = appearance.ui_builder();
-        let disclaimer_styles = UiComponentStyles {
-            font_color: Some(sub_text_color),
-            font_size: Some(12.),
-            ..Default::default()
-        };
-
-        let login_row = Flex::row()
-            .with_child(
-                ui_builder
-                    .span("Already have an account? ")
-                    .with_style(disclaimer_styles)
-                    .build()
-                    .finish(),
-            )
-            .with_child(
-                ui_builder
-                    .link(
-                        "Log in".into(),
-                        None,
-                        Some(Box::new(|ctx| {
-                            ctx.dispatch_typed_action(IntroSlideAction::LoginClicked);
-                        })),
-                        self.login_mouse_state.clone(),
-                    )
-                    .soft_wrap(false)
-                    .with_style(UiComponentStyles {
-                        font_size: Some(12.),
-                        ..Default::default()
-                    })
-                    .build()
-                    .finish(),
-            )
-            .finish();
-
+        // Local fork: fully-local build — no account login, so the
+        // "Already have an account? Log in" row is not rendered.
         let mut stack = Stack::new();
         stack.add_child(centered);
-        stack.add_positioned_child(
-            login_row,
-            OffsetPositioning::offset_from_parent(
-                vec2f(0., -28.),
-                ParentOffsetBounds::ParentBySize,
-                ParentAnchor::BottomMiddle,
-                ChildAnchor::BottomMiddle,
-            ),
-        );
         stack.finish()
     }
 }

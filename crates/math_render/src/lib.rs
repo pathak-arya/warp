@@ -15,10 +15,6 @@ use ratex_svg::{SvgOptions, render_to_svg};
 use ratex_types::color::Color;
 use ratex_types::math_style::MathStyle;
 
-/// Baseline font size (user units per em) the SVG is generated at. The SVG is
-/// vector output, so renderers can scale it to any display size; this only
-/// sets the coordinate scale.
-const FONT_SIZE: f64 = 40.0;
 const PADDING: f64 = 4.0;
 const STROKE_WIDTH: f64 = 1.5;
 
@@ -36,10 +32,13 @@ pub enum MathRenderError {
 /// * `display` — display style (`$$...$$`) vs. inline text style (`$...$`).
 /// * `color` — glyph color as a CSS-style string (e.g. `#e0e0e0`), typically
 ///   the theme's foreground color so math matches the surrounding text.
+/// * `font_size` — target em size in logical pixels; sets the SVG's intrinsic
+///   size so the equation renders at the same scale as surrounding text.
 pub fn render_math_to_svg(
     latex: &str,
     display: bool,
     color: &str,
+    font_size: f64,
 ) -> Result<String, MathRenderError> {
     let color =
         Color::parse(color).ok_or_else(|| MathRenderError::InvalidColor(color.to_string()))?;
@@ -50,7 +49,7 @@ pub fn render_math_to_svg(
     };
     let layout_options = LayoutOptions::default().with_style(style).with_color(color);
     let svg_options = SvgOptions {
-        font_size: FONT_SIZE,
+        font_size,
         padding: PADDING,
         stroke_width: STROKE_WIDTH,
         embed_glyphs: true,
