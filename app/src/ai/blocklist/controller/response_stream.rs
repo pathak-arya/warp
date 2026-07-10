@@ -202,6 +202,56 @@ impl ResponseStream {
         }
     }
 
+    /// Local-fork constructor: instead of streaming from the Warp cloud, run
+    /// the local Claude Code CLI and emit the same `ResponseEvent` sequence the
+    /// cloud would for a single agent turn. Everything downstream (the internal
+    /// event bookkeeping, re-emit to the controller, `apply_client_actions`,
+    /// completion) is reused verbatim, so the turn renders as normal agent
+    /// blocks — including typeset math — with no Warp login or server call.
+    pub fn new_local(
+        params: api::RequestParams,
+        prompt: String,
+        ai_identifiers: AIIdentifiers,
+        ctx: &mut ModelContext<Self>,
+    ) -> Self {
+        // Kept for API/model symmetry with `new`; local claude isn't cancelled
+        // mid-flight in v1 (the process runs to completion), but holding the
+        // sender lets `cancel()` still drop lagging events via the request-id
+        // guard in `handle_response_stream_event`.
+        let (cancellation_tx, _cancellation_rx) = oneshot::channel();
+        let start_time = Local::now();
+        let request_id = Uuid::new_v4();
+        Self::spawn_local_request(request_id, prompt, ctx);
+        Self {
+            id: ResponseStreamId(Uuid::new_v4().to_string()),
+            params,
+            start_time,
+            time_to_latest_event: TimeDelta::seconds(0),
+            cancellation_tx: Some(cancellation_tx),
+            retry_count: 0,
+            original_error: None,
+            has_received_client_actions: false,
+            ai_identifiers,
+            // Local claude turns never fall back to the cloud resume path.
+            can_attempt_resume_on_error: false,
+            should_resume_conversation_after_stream_finished: false,
+            stream_finished_received: false,
+            error_event_emitted: false,
+            deferred_retry_pending: false,
+            current_request_id: Some(request_id),
+        }
+    }
+
+    fn spawn_local_request(request_id: Uuid, prompt: String, ctx: &mut ModelContext<Self>) {
+        // Build the local stream after construction so it can be handed to
+        // `&mut self`; the claude subprocess only runs once the stream is
+        // polled inside `handle_response_stream_result`.
+        let _ = ctx.spawn(async move { prompt }, move |me, prompt, ctx| {
+            let stream = build_local_claude_stream(request_id, prompt);
+            me.handle_response_stream_result(request_id, Ok(stream), ctx);
+        });
+    }
+
     pub fn id(&self) -> &ResponseStreamId {
         &self.id
     }
@@ -718,6 +768,153 @@ pub enum ResponseStreamEvent {
         /// Some for cancellation (with context), None for natural completion (uses dynamic lookup).
         cancellation: Option<StreamCancellation>,
     },
+}
+
+/// Builds the local Claude-driven response stream: emit `Init`, run the local
+/// `claude` CLI, emit the assistant output as `CreateTask` + `AddMessagesToTask`
+/// client actions, then `Finished`. This is the exact `ResponseEvent` sequence
+/// the cloud sends for a single agent turn (verified against the live handler),
+/// so the whole existing rendering/lifecycle path applies — including the
+/// markdown math splitter on `AgentOutput.text`.
+fn build_local_claude_stream(request_id: Uuid, prompt: String) -> api::ResponseStream {
+    use warp_multi_agent_api as pb;
+
+    let request_id = request_id.to_string();
+    Box::pin(async_stream::stream! {
+        // 1. Init — creates the empty output container on the current exchange.
+        yield Ok(pb::ResponseEvent {
+            r#type: Some(response_event::Type::Init(response_event::StreamInit {
+                conversation_id: String::new(),
+                request_id: request_id.clone(),
+                run_id: String::new(),
+            })),
+        });
+
+        // 2. Run the local claude CLI to completion.
+        let text = run_local_claude(&prompt).await;
+
+        // 3. Client actions — upgrade the optimistic root task to a server task
+        //    (required before messages can be added) and attach the agent output.
+        let root_task_id = Uuid::new_v4().to_string();
+        let actions = vec![
+            pb::ClientAction {
+                action: Some(pb::client_action::Action::CreateTask(
+                    pb::client_action::CreateTask {
+                        task: Some(pb::Task {
+                            id: root_task_id.clone(),
+                            description: String::new(),
+                            dependencies: None,
+                            messages: vec![],
+                            summary: String::new(),
+                            server_data: String::new(),
+                        }),
+                    },
+                )),
+            },
+            pb::ClientAction {
+                action: Some(pb::client_action::Action::AddMessagesToTask(
+                    pb::client_action::AddMessagesToTask {
+                        task_id: root_task_id.clone(),
+                        messages: vec![pb::Message {
+                            id: Uuid::new_v4().to_string(),
+                            task_id: root_task_id.clone(),
+                            request_id: request_id.clone(),
+                            timestamp: None,
+                            server_message_data: String::new(),
+                            citations: vec![],
+                            fetched_memories: vec![],
+                            message: Some(pb::message::Message::AgentOutput(
+                                pb::message::AgentOutput { text },
+                            )),
+                        }],
+                    },
+                )),
+            },
+        ];
+        yield Ok(pb::ResponseEvent {
+            r#type: Some(response_event::Type::ClientActions(
+                response_event::ClientActions { actions },
+            )),
+        });
+
+        // 4. Finished — the success path stops the spinner and marks the turn done.
+        yield Ok(pb::ResponseEvent {
+            r#type: Some(response_event::Type::Finished(response_event::StreamFinished {
+                reason: Some(response_event::stream_finished::Reason::Done(
+                    response_event::stream_finished::Done {},
+                )),
+                token_usage: vec![],
+                should_refresh_model_config: false,
+                request_cost: None,
+                conversation_usage_metadata: None,
+            })),
+        });
+    })
+}
+
+/// Runs `claude --print --output-format stream-json` and returns the assistant
+/// text. Failures are returned as a user-facing string (rendered as the agent's
+/// output) rather than a stream error, so the turn always completes cleanly
+/// without triggering the cloud retry/resume path.
+async fn run_local_claude(prompt: &str) -> String {
+    let Some(claude_path) = crate::util::path::resolve_executable("claude") else {
+        return "⚠️ The local `claude` CLI was not found on your PATH. Install Claude Code to use the local agent.".to_string();
+    };
+
+    let output = command::r#async::Command::new(claude_path.as_os_str())
+        .args([
+            "--print",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            prompt,
+        ])
+        .output()
+        .await;
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let text = extract_claude_text(&out.stdout);
+            if text.trim().is_empty() {
+                "_(Claude returned no output.)_".to_string()
+            } else {
+                text
+            }
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            format!(
+                "⚠️ The local `claude` CLI exited with an error.\n\n```\n{}\n```",
+                stderr.trim()
+            )
+        }
+        Err(e) => format!("⚠️ Failed to launch the local `claude` CLI: {e}"),
+    }
+}
+
+/// Extracts the assistant-visible text from a captured claude stream-json dump,
+/// concatenating assistant text turns and falling back to the final `result`
+/// text. Thinking and tool events are ignored in v1.
+fn extract_claude_text(stdout: &[u8]) -> String {
+    use claude_stream_json::AgentStreamEvent;
+
+    let stdout = String::from_utf8_lossy(stdout);
+    let mut parts: Vec<String> = Vec::new();
+    let mut result_fallback: Option<String> = None;
+    for line in stdout.lines() {
+        for event in claude_stream_json::parse_line(line) {
+            match event {
+                AgentStreamEvent::AssistantText { text } => parts.push(text),
+                AgentStreamEvent::Result { text, .. } => result_fallback = Some(text),
+                _ => {}
+            }
+        }
+    }
+    if parts.is_empty() {
+        result_fallback.unwrap_or_default()
+    } else {
+        parts.join("\n\n")
+    }
 }
 
 impl Entity for ResponseStream {

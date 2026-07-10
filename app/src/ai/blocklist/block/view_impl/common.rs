@@ -2231,16 +2231,21 @@ fn render_math_section<A: Action>(
     if matches!(asset_state, AssetState::FailedToLoad(_)) {
         return render_visual_markdown_fallback(&math.markdown_source, text_color, app);
     }
-    let sizing = if matches!(asset_state, AssetState::Loaded { .. }) {
-        VisualMarkdownSizing::FitWidth {
-            max_height: mermaid_section_max_height(app),
-        }
-    } else {
-        VisualMarkdownSizing::FixedHeight {
+    // Render at the SVG's intrinsic (font-scaled) size rather than Mermaid's
+    // fit-to-pane-width, which would upscale an equation to fill the block.
+    // `max_width` = intrinsic width means no upscaling; a wider-than-pane
+    // equation still shrinks to fit because the parent constrains the box.
+    let sizing = match math_intrinsic_size(&asset_state) {
+        Some((width, height)) => VisualMarkdownSizing::FixedHeight {
+            height,
+            width: None,
+            max_width: Some(width),
+        },
+        None => VisualMarkdownSizing::FixedHeight {
             height: blocklist_base_line_height(app) * 2.,
             width: None,
             max_width: None,
-        }
+        },
     };
     render_visual_markdown_block(
         asset_source,
@@ -2425,6 +2430,26 @@ fn render_visual_card(
             VISUAL_CARD_CORNER_RADIUS,
         )))
         .finish()
+}
+
+/// Intrinsic `(width, height)` of a loaded math SVG in logical pixels, used to
+/// draw display math at its natural (font-scaled) size instead of upscaling it.
+fn math_intrinsic_size(asset_state: &AssetState<ImageType>) -> Option<(f32, f32)> {
+    let AssetState::Loaded { data } = asset_state else {
+        return None;
+    };
+    match data.as_ref() {
+        ImageType::Svg { svg } => {
+            let size = svg.size();
+            Some((
+                finite_positive_visual_size(Some(size.width()))?,
+                finite_positive_visual_size(Some(size.height()))?,
+            ))
+        }
+        ImageType::StaticBitmap { .. }
+        | ImageType::AnimatedBitmap { .. }
+        | ImageType::Unrecognized => None,
+    }
 }
 
 fn visual_section_max_width(asset_state: &AssetState<ImageType>, height: f32) -> Option<f32> {

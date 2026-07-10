@@ -53,6 +53,22 @@ fn default_harnesses() -> Vec<HarnessAvailability> {
     }]
 }
 
+/// Local fork: harnesses offered while logged out. Local harnesses run
+/// through their own CLIs (and their own auth), so they don't need the
+/// server's availability list — offer the ones whose CLI is installed.
+fn logged_out_local_harnesses() -> Vec<HarnessAvailability> {
+    let mut harnesses = default_harnesses();
+    if crate::ai::local_harness_setup::local_harness_setup_state(Harness::Claude).is_selectable() {
+        harnesses.push(HarnessAvailability {
+            harness: Harness::Claude,
+            display_name: "Claude Code".to_string(),
+            enabled: true,
+            available_models: vec![],
+        });
+    }
+    harnesses
+}
+
 #[derive(Debug, Clone)]
 pub enum AuthSecretFetchState {
     NotFetched,
@@ -339,8 +355,18 @@ impl HarnessAvailabilityModel {
     }
 
     pub fn refresh(&self, ctx: &mut ModelContext<Self>) {
-        // The endpoint queries `user`, which requires auth.
+        // Local fork: when logged out the server endpoint can't be queried
+        // (it requires auth), so offer the locally-installed harnesses
+        // instead. Local harnesses authenticate via their own CLIs.
         if !AuthStateProvider::as_ref(ctx).get().is_logged_in() {
+            ctx.spawn(async {}, |me, (), ctx| {
+                let local = logged_out_local_harnesses();
+                if local != me.harnesses {
+                    me.harnesses = local;
+                    me.cache(ctx);
+                    ctx.emit(HarnessAvailabilityEvent::Changed);
+                }
+            });
             return;
         }
 

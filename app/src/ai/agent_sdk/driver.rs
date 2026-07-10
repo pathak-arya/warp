@@ -482,6 +482,11 @@ pub enum AgentDriverError {
     MCPMissingVariables,
     #[error("Agent profile \"{0}\" not found")]
     ProfileError(String),
+    // Local fork: the login gate that constructed this was removed so the
+    // agent-SDK driver can run without a Warp account. The variant is retained
+    // because it's still classified/matched (error_classification.rs) and may be
+    // reintroduced upstream.
+    #[allow(dead_code)]
     #[error(
         "Failed to authenticate with server - please log in via 'oz login', provide an API key via '--api-key <key>', or set the WARP_API_KEY environment variable"
     )]
@@ -661,11 +666,9 @@ impl AgentDriver {
             )
         );
 
-        // If we're not logged in, the root view will go to an auth screen, and all subsequent steps will fail.
-        // This should be impossible, since we enforce login before reaching this point.
-        if !AuthStateProvider::as_ref(ctx).get().is_logged_in() {
-            return Err(AgentDriverError::NotLoggedIn);
-        }
+        // Local fork: no Warp login required. Local harnesses (Claude Code,
+        // Codex, ...) authenticate through their own CLIs; cloud (Oz)
+        // conversations attempted while logged out surface their own errors.
 
         // Extract the conversation ID if we're restoring a conversation.
         // This will be used when submitting the initial query to continue the conversation.

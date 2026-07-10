@@ -35,8 +35,8 @@ EOF
     exit 1
 fi
 
-echo "==> Rebuilding warp-oss"
+echo "==> Rebuilding warp-oss (release)"
 export PATH="$HOME/.cargo/bin:$PATH"
-cargo build --bin warp-oss
+cargo build --release --bin warp-oss
 
 echo "==> Sync complete: $(git log --oneline -1 master) + $(git rev-list master..local --count) local patches"

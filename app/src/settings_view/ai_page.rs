@@ -4726,9 +4726,9 @@ impl SettingsWidget for GlobalAIWidget {
         let is_ai_disabled_due_to_remote_session_org_policy =
             AISettings::as_ref(app).is_ai_disabled_due_to_remote_session_org_policy(app);
 
-        let is_anonymous = AuthStateProvider::as_ref(app)
-            .get()
-            .is_anonymous_or_logged_out();
+        // Local fork: AI works without a Warp account, so always show the real
+        // Active-AI toggle instead of the "create an account" sign-up prompt.
+        let is_anonymous = false;
 
         let mut row = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)

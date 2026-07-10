@@ -2433,6 +2433,29 @@ impl BlocklistAIController {
         let server_conversation_token_for_identifiers =
             conversation_data.server_conversation_token.clone();
 
+        // Local fork: when there's no Warp login (so the cloud Oz agent can't
+        // run) and the local Claude Code CLI is installed, route a user-initiated
+        // turn to local claude instead of the cloud. Passive/background requests
+        // are left to the normal (cloud) path so they simply no-op when logged
+        // out rather than spawning claude unexpectedly.
+        let contains_user_query = request_input.all_inputs().any(|input| input.is_user_query());
+        let use_local_claude = contains_user_query
+            && !is_passive_request
+            && crate::auth::AuthStateProvider::as_ref(ctx)
+                .get()
+                .is_anonymous_or_logged_out()
+            && crate::ai::local_harness_setup::local_harness_setup_state(
+                warp_cli::agent::Harness::Claude,
+            )
+            .is_selectable();
+        let local_claude_prompt = use_local_claude.then(|| {
+            request_input
+                .all_inputs()
+                .filter_map(|input| input.display_query())
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        });
+
         let response_stream = ctx.add_model(|ctx| {
             // Create AIIdentifiers for the response stream
             let ai_identifiers = AIIdentifiers {
@@ -2442,12 +2465,17 @@ impl BlocklistAIController {
                 client_exchange_id: None,
                 model_id: Some(request_params.model.clone()),
             };
-            ResponseStream::new(
-                request_params.clone(),
-                ai_identifiers,
-                can_attempt_resume_on_error,
-                ctx,
-            )
+            match local_claude_prompt {
+                Some(prompt) => {
+                    ResponseStream::new_local(request_params.clone(), prompt, ai_identifiers, ctx)
+                }
+                None => ResponseStream::new(
+                    request_params.clone(),
+                    ai_identifiers,
+                    can_attempt_resume_on_error,
+                    ctx,
+                ),
+            }
         });
         let response_stream_id = response_stream.as_ref(ctx).id().clone();
         let response_stream_clone = response_stream.clone();

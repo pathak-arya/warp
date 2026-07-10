@@ -1572,9 +1572,11 @@ fn launch_command(
 
     let auth_state = AuthStateProvider::handle(ctx).as_ref(ctx).get();
     if !auth_state.is_logged_in() {
-        return Err(anyhow::anyhow!(
-            "You are not logged in - please log in with `{cli_name} login` to continue."
-        ));
+        // Local fork: commands are allowed without a Warp login; local
+        // harnesses bring their own auth. Skip the auth-refresh wait below,
+        // which presumes credentials exist.
+        let _ = cli_name;
+        return dispatch_command(ctx, command, global_options);
     }
 
     // User is logged in — subscribe to auth events, trigger a refresh, and wait
