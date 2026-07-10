@@ -16278,6 +16278,7 @@ dependencies = [
  "libc",
  "log",
  "markdown_parser",
+ "math_render",
  "minimp4",
  "num-derive",
  "num-traits",

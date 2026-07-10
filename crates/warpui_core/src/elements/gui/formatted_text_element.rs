@@ -1,13 +1,19 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::cmp::Reverse;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::default::Default;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, Once};
 
+use bytes::Bytes;
 use itertools::Itertools;
-use markdown_parser::{Action, FormattedText, FormattedTextFragment, FormattedTextLine, Hyperlink};
+use markdown_parser::{
+    Action, FormattedText, FormattedTextFragment, FormattedTextLine, Hyperlink, MathMode,
+};
 use pathfinder_color::ColorU;
 use pathfinder_geometry::vector::{vec2f, Vector2F};
 use string_offset::{ByteOffset, CharOffset};
@@ -15,6 +21,8 @@ use vec1::vec1;
 use warp_errors::report_error;
 
 use super::{Highlight, ListNumbering, Selection};
+use crate::assets::asset_cache::{AssetCache, AssetSource, AssetState, AsyncAssetId, AsyncAssetType};
+use crate::image_cache::{AnimatedImageBehavior, CacheOption, FitType, ImageCache};
 use crate::elements::{
     Axis, ClickableCharRange, CornerRadius, Fill, HighlightedRange, HoverableCharRange,
     MouseStateHandle, PartialClickableElement, Point, Radius, SecretRange, SelectableElement,
@@ -34,7 +42,7 @@ use crate::text_layout::{
 };
 use crate::{
     AfterLayoutContext, AppContext, Element, Event, EventContext, LayoutContext, PaintContext,
-    SizeConstraint,
+    SingletonEntity, SizeConstraint,
 };
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadingFontSizeMultipliers {
@@ -160,6 +168,13 @@ pub struct FormattedTextElement {
     inline_code_bg_color: Option<ColorU>,
     hyperlink_support: HyperlinkSupport,
     saved_glyph_positions: Vec<SavedGlyphPositionIds>,
+    /// Inline `$...$` math spans, resolved during layout and composited over
+    /// their (transparent) source glyphs during paint.
+    inline_math_placements: Vec<InlineMathPlacement>,
+    /// Memoized typeset metrics (natural size, baseline fraction) per inline
+    /// math key. `None` records a failed typeset so the raw LaTeX source stays
+    /// visible and we don't retry every relayout.
+    math_metrics_cache: HashMap<String, Option<(Vector2F, f32)>>,
     is_selectable: bool,
     is_mouse_interaction_disabled: bool,
     disable_text_wrapping: bool,
@@ -198,6 +213,8 @@ impl FormattedTextElement {
             alignment: Default::default(),
             hyperlink_support,
             saved_glyph_positions: vec![],
+            inline_math_placements: vec![],
+            math_metrics_cache: HashMap::new(),
             is_selectable: false,
             is_mouse_interaction_disabled: false,
             disable_text_wrapping: false,
@@ -1308,6 +1325,199 @@ impl FormattedTextElement {
     }
 }
 
+impl FormattedTextElement {
+    /// Composites typeset inline-math images over their (transparent) source
+    /// spans, aligned to the surrounding text baseline. Runs after the text
+    /// frames have painted (so `frame_bounds` and row geometry are final) and
+    /// before selection so highlights draw over the images.
+    fn paint_inline_math(&self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        if self.inline_math_placements.is_empty() {
+            return;
+        }
+        let color_hex = format!(
+            "#{:02x}{:02x}{:02x}",
+            self.text_color.r, self.text_color.g, self.text_color.b
+        );
+
+        for placement in &self.inline_math_placements {
+            let SavedGlyphPosition::LaidOutTextFramePosition(pos) = placement.position else {
+                continue;
+            };
+            let Some(laid_out_frame) = self.laid_out_text.get(pos.frame_index) else {
+                continue;
+            };
+            let frame = match laid_out_frame {
+                LaidOutTextFrame::Text { text_frame, .. }
+                | LaidOutTextFrame::Indented { text_frame, .. }
+                | LaidOutTextFrame::CodeBlock { text_frame, .. } => text_frame,
+                LaidOutTextFrame::LineBreak { .. } => continue,
+            };
+            let Some(line) = frame.lines().get(pos.row_index) else {
+                continue;
+            };
+
+            let left_padding =
+                if let LaidOutTextFrame::Indented { left_padding, .. } = laid_out_frame {
+                    *left_padding
+                } else {
+                    0.
+                };
+            let x_start = line.x_for_index(pos.glyph_index);
+            // `x_for_index` returns the line width for indices past the row's
+            // last glyph, which clamps spans that wrap onto the next row.
+            let x_end = line
+                .x_for_index(pos.glyph_index + placement.char_len)
+                .max(x_start);
+            let span_width = x_end - x_start;
+
+            let y_offset = self
+                .laid_out_text
+                .iter()
+                .take(pos.frame_index)
+                .map(|frame| frame.calculate_frame_height())
+                .sum::<f32>()
+                + frame
+                    .lines()
+                    .iter()
+                    .take(pos.row_index)
+                    .map(|line| line.height())
+                    .sum::<f32>();
+            let baseline_y = y_offset
+                + line
+                    .baseline_y_for_index(pos.glyph_index)
+                    .unwrap_or(line.ascent);
+
+            // Draw at the typeset's natural size, shrinking (proportionally)
+            // only if the reserved source span is narrower than the image.
+            let mut draw_size = placement.natural_size;
+            if span_width > 0. && draw_size.x() > span_width {
+                draw_size = draw_size * (span_width / draw_size.x());
+            }
+            if draw_size.x() <= 0. || draw_size.y() <= 0. {
+                continue;
+            }
+
+            let top = baseline_y - placement.baseline_fraction * draw_size.y();
+            let rect = RectF::new(origin + vec2f(left_padding + x_start, top), draw_size);
+
+            let bounds = (draw_size * ctx.scene.scale_factor()).to_i32();
+            if bounds.x() <= 0 || bounds.y() <= 0 {
+                continue;
+            }
+            let asset_source = inline_math_asset_source(
+                &placement.latex,
+                placement.display,
+                &color_hex,
+                placement.font_size,
+            );
+            match ImageCache::as_ref(app).image(
+                asset_source,
+                bounds,
+                FitType::Contain,
+                AnimatedImageBehavior::FirstFramePreview,
+                CacheOption::BySize,
+                ctx.max_texture_dimension_2d,
+                AssetCache::as_ref(app),
+            ) {
+                AssetState::Loaded { data } => {
+                    if let crate::image_cache::Image::Static(static_image) = &*data {
+                        ctx.scene.draw_image(
+                            rect,
+                            static_image.clone(),
+                            1.0,
+                            CornerRadius::default(),
+                        );
+                    }
+                }
+                AssetState::Loading { handle } => {
+                    // Repaint once the SVG asset lands so the math appears.
+                    ctx.repaint_after_load(handle);
+                }
+                AssetState::Evicted | AssetState::FailedToLoad(_) => {}
+            }
+        }
+    }
+}
+
+/// Typesets `latex` once to learn its natural (logical-pixel) size and
+/// baseline fraction. Returns `None` when the source can't be typeset, in
+/// which case the raw source is rendered as normal text.
+fn compute_inline_math_metrics(
+    latex: &str,
+    mode: MathMode,
+    font_size: f32,
+) -> Option<(Vector2F, f32)> {
+    // Metrics are independent of glyph color.
+    let rendered = math_render::render_math(
+        latex,
+        matches!(mode, MathMode::Display),
+        "#000000",
+        f64::from(font_size),
+    )
+    .ok()?;
+    let tree =
+        resvg::usvg::Tree::from_data(rendered.svg.as_bytes(), &resvg::usvg::Options::default())
+            .ok()?;
+    let size = tree.size();
+    Some((
+        vec2f(size.width(), size.height()),
+        rendered.baseline_fraction,
+    ))
+}
+
+/// Async asset source producing the typeset SVG for an inline math span. The
+/// id hashes latex + style + color + font size, so theme or font-size changes
+/// re-render instead of hitting a stale cache entry.
+fn inline_math_asset_source(
+    latex: &str,
+    display: bool,
+    color: &str,
+    font_size: f32,
+) -> AssetSource {
+    let mut hasher = DefaultHasher::new();
+    latex.hash(&mut hasher);
+    display.hash(&mut hasher);
+    color.hash(&mut hasher);
+    font_size.to_bits().hash(&mut hasher);
+    let id = format!("inline-math:{:x}", hasher.finish());
+
+    let latex = latex.to_string();
+    let color = color.to_string();
+    AssetSource::Async {
+        id: AsyncAssetId::new::<InlineMathAsset>(id),
+        fetch: Arc::new(move || {
+            let latex = latex.clone();
+            let color = color.clone();
+            Box::pin(async move {
+                math_render::render_math_to_svg(&latex, display, &color, f64::from(font_size))
+                    .map(|svg| Bytes::from(svg.into_bytes()))
+                    .map_err(Into::into)
+            })
+        }),
+    }
+}
+
+/// Marker type namespacing inline-math SVG assets in the asset cache.
+struct InlineMathAsset;
+impl AsyncAssetType for InlineMathAsset {}
+
+/// An inline `$...$` math span. The LaTeX source is laid out as transparent
+/// glyphs so every text semantic (selection, copy, wrapping, find, hit
+/// testing) operates on the source text unchanged; the typeset image is
+/// composited over the span at paint time, aligned to the text baseline.
+struct InlineMathPlacement {
+    /// Mirrors the saved-glyph-position lifecycle: recorded against the
+    /// formatted-text line during layout assembly, then resolved to a
+    /// laid-out frame/row in the same pass that resolves saved positions.
+    position: SavedGlyphPosition,
+    char_len: usize,
+    latex: String,
+    display: bool,
+    font_size: f32,
+    natural_size: Vector2F,
+    baseline_fraction: f32,
+}
+
 enum LaidOutTextFrame {
     Text {
         text_frame: Arc<TextFrame>,
@@ -1650,6 +1860,7 @@ impl Element for FormattedTextElement {
         app: &AppContext,
     ) -> Vector2F {
         self.laid_out_text = vec![];
+        self.inline_math_placements = vec![];
         let max_width = constraint.max_along(Axis::Horizontal);
         let max_height = constraint.max_along(Axis::Vertical);
 
@@ -1790,6 +2001,55 @@ impl Element for FormattedTextElement {
                 let mut current_link_style: Option<HighlightedRange> = None;
 
                 for inline in texts {
+                    // Inline math: keep the LaTeX source as transparent glyphs
+                    // so selection/copy/wrapping/find all operate on the source
+                    // text unchanged, and composite the typeset image over the
+                    // span at paint time. On typesetting failure the source
+                    // stays visible as normal text.
+                    if let Some(math_mode) = inline.styles.math {
+                        let metrics_key = format!(
+                            "{}\u{1}{math_mode:?}\u{1}{}",
+                            inline.text,
+                            font_size.to_bits()
+                        );
+                        let metrics = match self.math_metrics_cache.entry(metrics_key) {
+                            Entry::Occupied(entry) => *entry.get(),
+                            Entry::Vacant(vacant) => *vacant.insert(
+                                compute_inline_math_metrics(&inline.text, math_mode, font_size),
+                            ),
+                        };
+                        if let Some((natural_size, baseline_fraction)) = metrics {
+                            let char_count = inline.text.chars().count();
+                            let mut math_text_style = TextStyle::default();
+                            math_text_style.foreground_color = Some(ColorU::new(0, 0, 0, 0));
+                            styles.push((
+                                prev_index..prev_index + char_count,
+                                StyleAndFont::new(
+                                    self.family_id,
+                                    Properties::default(),
+                                    math_text_style,
+                                ),
+                            ));
+                            self.inline_math_placements.push(InlineMathPlacement {
+                                position: SavedGlyphPosition::FormattedTextLinePosition(
+                                    FormattedTextSelectionLocation {
+                                        frame_index: line_index,
+                                        row_index: 0,
+                                        glyph_index: prev_index,
+                                    },
+                                ),
+                                char_len: char_count,
+                                latex: inline.text.clone(),
+                                display: matches!(math_mode, MathMode::Display),
+                                font_size,
+                                natural_size,
+                                baseline_fraction,
+                            });
+                            prev_index += char_count;
+                            text.push_str(&inline.text);
+                            continue;
+                        }
+                    }
                     let fragment_char_count = inline.text.chars().count();
                     let mut character_count = 0;
 
@@ -2030,6 +2290,36 @@ impl Element for FormattedTextElement {
                     }
                 });
 
+            // Resolve inline-math placements for this line to their laid-out
+            // frame/row, mirroring the saved-glyph-position resolution above.
+            // Placement indices were recorded from the assembled text and so
+            // already include `glyph_offset`; it is not re-added here.
+            for placement in &mut self.inline_math_placements {
+                if let SavedGlyphPosition::FormattedTextLinePosition(pos) = placement.position {
+                    if pos.frame_index != line_index {
+                        continue;
+                    }
+
+                    let mut row_index = 0;
+                    let mut glyph_accum = 0;
+                    for row in text_frame.lines() {
+                        if row.end_index() > pos.glyph_index - glyph_accum {
+                            break;
+                        }
+                        row_index += 1;
+                        glyph_accum += row.end_index();
+                    }
+
+                    placement.position = SavedGlyphPosition::LaidOutTextFramePosition(
+                        FormattedTextSelectionLocation {
+                            frame_index,
+                            row_index,
+                            glyph_index: pos.glyph_index,
+                        },
+                    );
+                }
+            }
+
             let laid_out_frame = match line_type {
                 LineType::FormattedLine => LaidOutTextFrame::Text {
                     text_frame,
@@ -2089,7 +2379,7 @@ impl Element for FormattedTextElement {
 
     fn after_layout(&mut self, _: &mut AfterLayoutContext, _: &AppContext) {}
 
-    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, _: &AppContext) {
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
         self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
         let mut mut_origin = origin;
         let size = self.size().expect("Expected size to not be none");
@@ -2229,6 +2519,10 @@ impl Element for FormattedTextElement {
             }
             mut_origin += vec2f(0., frame_height);
         }
+
+        // Composite typeset inline math over its (transparent) source spans,
+        // before the selection pass so highlights draw over the images.
+        self.paint_inline_math(origin, ctx, app);
 
         // Draw selection if there is one
         if let Some(point_ranges) = self.calculate_point_ranges(ctx.current_selection) {

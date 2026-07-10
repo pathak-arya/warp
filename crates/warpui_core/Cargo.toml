@@ -54,6 +54,7 @@ log = "0.4"
 schemars = { version = "1", optional = true }
 settings_value = { workspace = true, optional = true, features = ["derive"] }
 markdown_parser.workspace = true
+math_render.workspace = true
 num-derive = "0.4.2"
 num-traits.workspace = true
 num_cpus = "1.0"

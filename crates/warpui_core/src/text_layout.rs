@@ -1040,6 +1040,21 @@ impl Line {
         self.width
     }
 
+    /// The baseline y-position (in this line's coordinates) of the glyph at
+    /// `index`, mirroring [`Self::x_for_index`]. `None` when the index has no
+    /// glyph in this line.
+    pub fn baseline_y_for_index(&self, index: usize) -> Option<f32> {
+        for run in &self.runs {
+            for glyph in &run.glyphs {
+                if glyph.index == index {
+                    return Some(glyph.position_along_baseline.y());
+                }
+            }
+        }
+
+        None
+    }
+
     /// The width in pixels of the glyph at this index. Returns None if the index is invalid.
     pub fn width_for_index(&self, index: usize) -> Option<f32> {
         let mut prev_glyph = self.runs.first().and_then(|run| run.glyphs.first())?;
