@@ -2383,9 +2383,11 @@ impl Element for FormattedTextElement {
                 });
 
             // Resolve inline-math placements for this line to their laid-out
-            // frame/row, mirroring the saved-glyph-position resolution above.
-            // Placement indices were recorded from the assembled text and so
-            // already include `glyph_offset`; it is not re-added here.
+            // frame/row. Wrapped rows carry frame-global glyph indices (the
+            // platform layout re-bases each row by its starting char offset),
+            // so the row containing an index is simply the first row whose
+            // global end index exceeds it. Placement indices were recorded
+            // from the assembled text and so already include `glyph_offset`.
             for placement in &mut self.inline_math_placements {
                 if let SavedGlyphPosition::FormattedTextLinePosition(pos) = placement.position {
                     if pos.frame_index != line_index {
@@ -2393,14 +2395,13 @@ impl Element for FormattedTextElement {
                     }
 
                     let mut row_index = 0;
-                    let mut glyph_accum = 0;
                     for row in text_frame.lines() {
-                        if row.end_index() > pos.glyph_index - glyph_accum {
+                        if row.end_index() > pos.glyph_index {
                             break;
                         }
                         row_index += 1;
-                        glyph_accum += row.end_index();
                     }
+                    row_index = row_index.min(text_frame.lines().len().saturating_sub(1));
 
                     placement.position = SavedGlyphPosition::LaidOutTextFramePosition(
                         FormattedTextSelectionLocation {
